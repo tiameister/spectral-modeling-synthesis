@@ -1,0 +1,33 @@
+# Spectral Modeling Synthesis — default parameters (Serra & Smith, 1990)
+# See docs/TECHNICAL_REPORT.md for equations and rationale.
+
+sample_rate_hz: 44100
+
+analysis:
+  n_fft: 2048                    # Blackman-Harris window length
+  hop_size: 512                  # 75% overlap (M = 4H)
+  window: blackman_harris
+  kaiser_beta: null              # only used when window = kaiser
+
+peak_detection:
+  threshold_db: -50.0            # relative to frame peak (log-magnitude)
+  min_separation_bins: 4
+  max_peaks_per_frame: 40
+
+continuation:
+  max_frequency_deviation_hz: 80.0
+  max_missed_frames: 3           # "sleeping time"
+  harmonic_tolerance: 0.07
+  min_duration_frames: 3
+
+f0_estimation:
+  search_lo_hz: 80.0
+  search_hi_hz: 200.0
+
+stochastic:
+  envelope_section_bandwidth_hz: 350.0   # Fig. 7 piecewise-linear sections
+  harmonic_notch_radius_bins: 2
+  grain_length: 2048
+  overlap_add_hop: 512
+
+random_seed: 42
