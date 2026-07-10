@@ -64,7 +64,7 @@ class SmsGui(tk.Tk):
         )
 
         params_frame = ttk.LabelFrame(self, text="Parameters")
-        params_frame.pack(fill="x", **padx)
+        params_frame.pack(fill="x", **pad)
 
         defaults = DEFAULT_SMS_PARAMS
         self.vars = {
