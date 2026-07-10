@@ -2,9 +2,13 @@
 
 A Python implementation of **Spectral Modeling Synthesis (SMS)** from Serra & Smith (1990). The signal is decomposed into a **deterministic** branch (tracked sinusoidal partials) and a **stochastic** branch (filtered noise residual):
 
-\[
-s(t) = d(t) + e(t) = \sum_{r} A_r(t)\cos[\theta_r(t)] + e(t)
-\]
+```
+s(t) = d(t) + e(t) = Σᵣ Aᵣ(t) · cos[θᵣ(t)] + e(t)
+```
+
+Equivalently, in standard notation:
+
+$$s(t) = d(t) + e(t) = \sum_{r} A_r(t)\cos[\theta_r(t)] + e(t)$$
 
 This repository was developed as a **student project** for the Audio Seminar (SS26) during my MSc studies in **Communication and Multimedia Engineering (CME)** at **Friedrich-Alexander-Universität Erlangen-Nürnberg (FAU)**.
 
@@ -25,13 +29,19 @@ pip install -r requirements.txt
 python examples/run_sms.py path/to/your_mono.wav --output-dir output/
 ```
 
+**GUI** (load audio, tweak parameters, run synthesis):
+
+```bash
+python examples/sms_gui.py
+```
+
 **Outputs** (written to `output/` by default):
 
 | File | Content |
 |------|---------|
-| `*_deterministic.wav` | Sinusoidal branch \(d(t)\) |
-| `*_stochastic.wav` | Residual branch \(e(t)\) |
-| `*_resynthesis.wav` | Full reconstruction \(d(t) + e(t)\) |
+| `*_deterministic.wav` | Sinusoidal branch `d(t)` |
+| `*_stochastic.wav` | Residual branch `e(t)` |
+| `*_resynthesis.wav` | Full reconstruction `d(t) + e(t)` |
 
 Provide your own **mono WAV** input. The repository does not bundle audio files.
 
@@ -48,7 +58,7 @@ Default parameters from the paper live in [`config/sms_defaults.yaml`](config/sm
 | Parameter | Default | Paper meaning |
 |-----------|---------|---------------|
 | `analysis.n_fft` | 2048 | STFT window length |
-| `analysis.hop_size` | 512 | 75% overlap (\(M = 4H\)) |
+| `analysis.hop_size` | 512 | 75% overlap (M = 4H) |
 | `analysis.window` | `blackman_harris` | Low-sidelobe analysis window |
 | `peak_detection.threshold_db` | −50 | Log-magnitude peak threshold |
 | `continuation.max_frequency_deviation_hz` | 80 | Peak–guide matching radius |
@@ -64,7 +74,7 @@ Override with `--config path/to/custom.yaml` in the example scripts.
 ```
 config/          Paper-default parameters (YAML)
 sms/             Core library (analysis, synthesis, envelope)
-examples/        CLI tools for running SMS on your audio
+examples/        CLI tools and simple GUI for running SMS
 docs/            Technical reference (equations, Q&A)
 tests/           Validation and parameter-sweep scripts
 ```
@@ -75,7 +85,7 @@ See [`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md) for equations, pipeli
 
 1. **Analysis (deterministic):** Compute magnitude STFT → detect peaks in log-magnitude → parabolic sub-bin refinement → link peaks across frames with frequency guides.
 2. **Synthesis (deterministic):** Resynthesize partials as additive oscillators with trapezoidal phase integration.
-3. **Analysis (stochastic):** Subtract deterministic STFT magnitude from original: \(|E_\ell| = ||X_\ell| - |D_\ell||\).
+3. **Analysis (stochastic):** Subtract deterministic STFT magnitude from original: `|E_l| = ||X_l| - |D_l||`.
 4. **Synthesis (stochastic):** Fit piecewise-linear spectral envelope → random-phase grains → overlap-add.
 
 ## Limitations
