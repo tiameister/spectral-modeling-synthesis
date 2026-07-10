@@ -1,6 +1,7 @@
 _local/
 pdf/
 output/
+output/gui/
 audio/
 figures/
 tests/window_comparison/
