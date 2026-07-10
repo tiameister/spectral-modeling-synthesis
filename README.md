@@ -29,13 +29,23 @@ pip install -r requirements.txt
 python examples/run_sms.py path/to/your_mono.wav --output-dir output/
 ```
 
-**GUI** (load audio, tweak parameters, run synthesis):
+**GUI** (tabbed studio — load audio, tweak parameters, preview waveforms, play results):
 
 ```bash
+pip install -r requirements.txt
 python examples/sms_gui.py
 ```
 
-**Outputs** (written to `output/` by default):
+| Tab | Purpose |
+|-----|---------|
+| **General** | Load WAV, SMS parameters, run synthesis, session log |
+| **Visuals** | Waveform previews (original, deterministic, stochastic, resynthesis) |
+| **Sounds** | Playback and WAV export |
+| **Figures** | Optional — enable on Visuals tab; spectrogram plots via [`examples/sms_visuals.py`](examples/sms_visuals.py) |
+
+Keyboard shortcuts: `Ctrl+O` load, `Ctrl+R` run, `Ctrl+1/2/3` switch tabs, `Space` stop playback.
+
+**Outputs** (written to `output/gui/` by default):
 
 | File | Content |
 |------|---------|
@@ -45,11 +55,13 @@ python examples/sms_gui.py
 
 Provide your own **mono WAV** input. The repository does not bundle audio files.
 
-Optional decomposition figure:
+Optional decomposition figure (CLI — same renderer as the GUI Figures tab):
 
 ```bash
 python examples/plot_decomposition.py path/to/your_mono.wav
 ```
+
+Shared plotting code lives in [`examples/sms_visuals.py`](examples/sms_visuals.py).
 
 ## Configuration
 
@@ -74,7 +86,7 @@ Override with `--config path/to/custom.yaml` in the example scripts.
 ```
 config/          Paper-default parameters (YAML)
 sms/             Core library (analysis, synthesis, envelope)
-examples/        CLI tools and simple GUI for running SMS
+examples/        CLI tools, GUI (sms_gui.py), and shared visuals (sms_visuals.py)
 docs/            Technical reference (equations, Q&A)
 tests/           Validation and parameter-sweep scripts
 ```

@@ -13,35 +13,14 @@ import argparse
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy import signal
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from examples.sms_visuals import save_decomposition_figure
 from sms import DEFAULT_SMS_PARAMS, load_config, load_mono_audio, spectral_modeling_synthesis
-
-
-def _narrowband_spectrogram(
-    x: np.ndarray,
-    sample_rate_hz: int,
-    n_fft: int = 2048,
-    hop_size: int = 512,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    window = signal.windows.blackmanharris(n_fft, sym=True)
-    freqs_hz, times_s, spec = signal.spectrogram(
-        x,
-        fs=sample_rate_hz,
-        window=window,
-        nperseg=n_fft,
-        noverlap=n_fft - hop_size,
-        mode="magnitude",
-        scaling="spectrum",
-    )
-    spec_db = 20.0 * np.log10(np.maximum(spec, 1e-12))
-    return freqs_hz, times_s, spec_db
 
 
 def main() -> None:
@@ -68,40 +47,18 @@ def main() -> None:
         params=params,
     )
 
-    branches = [
-        ("Original", original),
-        ("Deterministic", det),
-        ("Stochastic", stoch),
-    ]
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
-    for ax, (title, sig) in zip(axes, branches, strict=True):
-        freqs_hz, times_s, spec_db = _narrowband_spectrogram(sig, sample_rate_hz)
-        mask = freqs_hz <= args.fmax
-        mesh = ax.pcolormesh(
-            times_s,
-            freqs_hz[mask] / 1000.0,
-            spec_db[mask, :],
-            shading="gouraud",
-            cmap="magma",
-            vmin=-80,
-            vmax=0,
-        )
-        ax.set_title(title)
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Frequency (kHz)")
-
-    fig.colorbar(mesh, ax=axes, label="Magnitude (dB)", fraction=0.02, pad=0.02)
-    fig.suptitle(
-        f"SMS decomposition — f0 ≈ {analysis.f0_hz:.1f} Hz, k = {len(analysis.partials)} partials",
-        fontsize=11,
+    path = save_decomposition_figure(
+        original,
+        det,
+        stoch,
+        sample_rate_hz,
+        analysis,
+        args.output,
+        fmax_hz=args.fmax,
+        n_fft=params.n_fft,
+        hop_size=params.hop_size,
     )
-    fig.tight_layout()
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved: {args.output}")
+    print(f"Saved: {path}")
 
 
 if __name__ == "__main__":

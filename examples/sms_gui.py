@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Simple GUI for Spectral Modeling Synthesis.
+Tabbed GUI for Spectral Modeling Synthesis.
 
-Load a mono WAV, adjust key SMS parameters, run synthesis, and play/save outputs.
+Tabs:
+    General  — load audio, parameters, run synthesis, log
+    Visuals  — waveform previews for all branches
+    Sounds   — playback and export
+    Figures  — optional analysis plots (see examples/plot_decomposition.py)
 
 Usage:
     python examples/sms_gui.py
@@ -27,11 +31,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from examples.sms_visuals import create_decomposition_figure, waveform_envelope
 from sms import DEFAULT_SMS_PARAMS, export_wav, load_mono_audio, spectral_modeling_synthesis
 
 OUTPUT_DIR = ROOT / "output" / "gui"
+FIGURES_DIR = OUTPUT_DIR / "figures"
 MAX_LOG_LINES = 80
-WAVEFORM_POINTS = 180
+FIGURES_TAB = "Figures"
+
+FIGURE_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "decomposition",
+        "Decomposition spectrograms",
+        "examples/plot_decomposition.py",
+    ),
+)
 
 
 # AudioLabs-inspired studio palette (beamerthemeal.sty)
@@ -51,6 +65,21 @@ class Theme:
     ERROR = "#e85555"
     WAVEFORM = "#37bae2"
     WAVEFORM_FILL = "#1a3a4a"
+
+
+WAVEFORM_BRANCHES: tuple[tuple[str, str, str, str], ...] = (
+    ("original", "Original", Theme.WAVEFORM, Theme.WAVEFORM_FILL),
+    ("det", "Deterministic", Theme.ORANGE, "#3d2a10"),
+    ("stoch", "Stochastic", Theme.MAGENTA, "#2d1a3d"),
+    ("full", "Resynthesis", Theme.TEAL, "#0d2d30"),
+)
+
+PLAYBACK_BRANCHES: tuple[tuple[str, str, str], ...] = (
+    ("original", "Original", Theme.WAVEFORM),
+    ("det", "Deterministic", Theme.ORANGE),
+    ("stoch", "Stochastic", Theme.MAGENTA),
+    ("full", "Resynthesis", Theme.TEAL),
+)
 
 
 @dataclass(frozen=True)
@@ -133,12 +162,73 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
     ),
 )
 
-PLAYBACK_BRANCHES: tuple[tuple[str, str, str], ...] = (
-    ("original", "Original", Theme.WAVEFORM),
-    ("det", "Deterministic", Theme.ORANGE),
-    ("stoch", "Stochastic", Theme.MAGENTA),
-    ("full", "Resynthesis", Theme.TEAL),
-)
+
+class WaveformPanel(ctk.CTkFrame):
+    """Compact labeled waveform strip."""
+
+    def __init__(self, parent: ctk.CTkFrame, title: str, line_color: str, fill_color: str) -> None:
+        super().__init__(parent, fg_color=Theme.SURFACE_ALT, corner_radius=10)
+        self.line_color = line_color
+        self.fill_color = fill_color
+        self._cache: list[float] = []
+
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self,
+            text=title,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=line_color,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+
+        self.canvas = tk.Canvas(self, height=64, bg=Theme.SURFACE_ALT, highlightthickness=0, bd=0)
+        self.canvas.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 10))
+        self.canvas.bind("<Configure>", self._on_resize)
+        self._draw_placeholder()
+
+    def set_audio(self, audio: np.ndarray | None) -> None:
+        self._cache = waveform_envelope(audio)
+        self._redraw()
+
+    def clear(self) -> None:
+        self._cache = []
+        self._draw_placeholder()
+
+    def _draw_placeholder(self) -> None:
+        self.canvas.delete("all")
+        w = max(self.canvas.winfo_width(), 200)
+        h = 64
+        mid = h // 2
+        self.canvas.create_line(0, mid, w, mid, fill=Theme.BORDER, width=1)
+        self.canvas.create_text(w // 2, mid, text="—", fill=Theme.MUTED, font=("Segoe UI", 10))
+
+    def _on_resize(self, _event: tk.Event) -> None:
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.canvas.delete("all")
+        w = max(self.canvas.winfo_width(), 200)
+        h = 64
+        mid = h / 2
+        amp = (h / 2) - 6
+
+        if not self._cache:
+            self._draw_placeholder()
+            return
+
+        points: list[float] = []
+        n = len(self._cache)
+        for i, sample in enumerate(self._cache):
+            x = i * (w - 1) / max(n - 1, 1)
+            y = mid - sample * amp
+            points.extend((x, y))
+
+        fill_points = [(0, mid), *zip(points[::2], points[1::2]), (w, mid)]
+        flat_fill = [coord for point in fill_points for coord in point]
+        self.canvas.create_polygon(*flat_fill, fill=self.fill_color, outline="")
+        self.canvas.create_line(*points, fill=self.line_color, width=1.5, smooth=True)
+        self.canvas.create_line(0, mid, w, mid, fill=Theme.BORDER, width=1)
 
 
 class SmsGui(ctk.CTk):
@@ -148,8 +238,8 @@ class SmsGui(ctk.CTk):
         ctk.set_default_color_theme("dark-blue")
 
         self.title("SMS Studio")
-        self.geometry("720x820")
-        self.minsize(640, 700)
+        self.geometry("760x780")
+        self.minsize(680, 640)
         self.configure(fg_color=Theme.BG)
 
         self.input_path: Path | None = None
@@ -158,20 +248,26 @@ class SmsGui(ctk.CTk):
         self.det: np.ndarray | None = None
         self.stoch: np.ndarray | None = None
         self.full: np.ndarray | None = None
+        self.analysis = None
         self.analysis_info = ""
         self._playing_branch: str | None = None
-        self._waveform_cache: list[float] = []
         self._progress_job: str | None = None
         self._param_sync_guard = False
+        self._figures_tab_visible = False
+        self._figure_canvas = None
+        self._figure_toolbar = None
+        self._current_figure = None
 
         self.param_widgets: dict[str, Any] = {}
         self.param_vars: dict[str, tk.StringVar] = {}
         self.play_buttons: dict[str, ctk.CTkButton] = {}
+        self.wave_panels: dict[str, WaveformPanel] = {}
+        self.figure_vars: dict[str, tk.BooleanVar] = {}
 
         self._build_ui()
         self._bind_shortcuts()
         self.report_callback_exception = self._report_callback_exception  # type: ignore[method-assign]
-        self._set_status("idle", "Load a mono WAV to begin.")
+        self._set_status("idle", "Load a mono WAV on the General tab to begin.")
         self._update_playback_state()
 
     def _report_callback_exception(
@@ -184,18 +280,37 @@ class SmsGui(ctk.CTk):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         self._build_header()
-        self._build_file_section()
-        self._build_params_section()
-        self._build_run_section()
-        self._build_playback_section()
-        self._build_log_section()
+
+        self.tabs = ctk.CTkTabview(
+            self,
+            fg_color=Theme.SURFACE,
+            segmented_button_fg_color=Theme.SURFACE_ALT,
+            segmented_button_selected_color=Theme.ORANGE,
+            segmented_button_selected_hover_color=Theme.ORANGE_DIM,
+            segmented_button_unselected_color=Theme.SURFACE_ALT,
+            segmented_button_unselected_hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+        )
+        self.tabs.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 16))
+
+        self.tab_general = self.tabs.add("General")
+        self.tab_visuals = self.tabs.add("Visuals")
+        self.tab_sounds = self.tabs.add("Sounds")
+
+        for tab in (self.tab_general, self.tab_visuals, self.tab_sounds):
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+
+        self._build_general_tab()
+        self._build_visuals_tab()
+        self._build_sounds_tab()
 
     def _build_header(self) -> None:
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 6))
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
         header.grid_columnconfigure(0, weight=1)
 
         title_row = ctk.CTkFrame(header, fg_color="transparent")
@@ -220,67 +335,63 @@ class SmsGui(ctk.CTk):
             anchor="w",
         ).grid(row=1, column=1, sticky="w", pady=(2, 0))
 
-    def _section(self, row: int, title: str) -> ctk.CTkFrame:
-        outer = ctk.CTkFrame(self, fg_color="transparent")
-        outer.grid(row=row, column=0, sticky="ew", padx=20, pady=(0, 10))
+    def _card(self, parent: ctk.CTkFrame, title: str | None = None) -> ctk.CTkFrame:
+        outer = ctk.CTkFrame(parent, fg_color="transparent")
         outer.grid_columnconfigure(0, weight=1)
+        if title:
+            ctk.CTkLabel(
+                outer,
+                text=title.upper(),
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=Theme.MUTED,
+                anchor="w",
+            ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+            row = 1
+        else:
+            row = 0
 
-        ctk.CTkLabel(
-            outer,
-            text=title.upper(),
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=Theme.MUTED,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        card = ctk.CTkFrame(outer, fg_color=Theme.SURFACE, corner_radius=12, border_width=1, border_color=Theme.BORDER)
-        card.grid(row=1, column=0, sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
-        return card
-
-    def _build_file_section(self) -> None:
-        card = self._section(1, "Source audio")
-
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=14, pady=14)
-        inner.grid_columnconfigure(0, weight=1)
-
-        self.wave_canvas = tk.Canvas(
-            inner,
-            height=72,
-            bg=Theme.SURFACE_ALT,
-            highlightthickness=0,
-            bd=0,
+        card = ctk.CTkFrame(
+            outer, fg_color=Theme.SURFACE_ALT, corner_radius=12, border_width=1, border_color=Theme.BORDER
         )
-        self.wave_canvas.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-        self.wave_canvas.bind("<Configure>", self._on_wave_resize)
-        self._draw_empty_waveform()
+        card.grid(row=row, column=0, sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
+        outer.card = card  # type: ignore[attr-defined]
+        return outer
 
-        info = ctk.CTkFrame(inner, fg_color="transparent")
-        info.grid(row=1, column=0, sticky="ew")
+    def _build_general_tab(self) -> None:
+        scroll = ctk.CTkScrollableFrame(self.tab_general, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # Source audio
+        source_wrap = self._card(scroll, "Source audio")
+        source_wrap.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        source = source_wrap.card  # type: ignore[attr-defined]
+
+        info = ctk.CTkFrame(source, fg_color="transparent")
+        info.pack(fill="x", padx=14, pady=14)
         info.grid_columnconfigure(0, weight=1)
 
         self.path_var = tk.StringVar(value="No file loaded")
         ctk.CTkLabel(
             info,
             textvariable=self.path_var,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=14, weight="bold"),
             text_color=Theme.TEXT,
             anchor="w",
-            wraplength=420,
         ).grid(row=0, column=0, sticky="w")
 
-        self.meta_var = tk.StringVar(value="—")
+        self.meta_var = tk.StringVar(value="Load a mono WAV to start.")
         ctk.CTkLabel(
             info,
             textvariable=self.meta_var,
             font=ctk.CTkFont(size=12),
             text_color=Theme.MUTED,
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        actions = ctk.CTkFrame(inner, fg_color="transparent")
-        actions.grid(row=1, column=1, sticky="e", padx=(12, 0))
+        actions = ctk.CTkFrame(info, fg_color="transparent")
+        actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
         ctk.CTkButton(
             actions,
@@ -299,43 +410,345 @@ class SmsGui(ctk.CTk):
             text="Output folder",
             width=110,
             height=34,
-            fg_color=Theme.SURFACE_ALT,
+            fg_color=Theme.SURFACE,
             hover_color=Theme.BORDER,
             border_width=1,
             border_color=Theme.BORDER,
             command=self._open_output_dir,
         ).pack(side="left")
 
-    def _build_params_section(self) -> None:
-        card = self._section(2, "Parameters")
+        # Parameters
+        params_wrap = self._card(scroll, "Parameters")
+        params_wrap.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        params_card = params_wrap.card  # type: ignore[attr-defined]
 
-        scroll = ctk.CTkScrollableFrame(card, fg_color="transparent", height=220)
-        scroll.pack(fill="x", padx=10, pady=10)
-        scroll.grid_columnconfigure((0, 1), weight=1, uniform="params")
+        params_scroll = ctk.CTkScrollableFrame(params_card, fg_color="transparent", height=200)
+        params_scroll.pack(fill="x", padx=8, pady=8)
+        params_scroll.grid_columnconfigure((0, 1), weight=1, uniform="params")
 
         for index, spec in enumerate(PARAM_SPECS):
-            col = index % 2
-            row = index // 2
-            self._add_param_widget(scroll, spec, row, col)
-
-        footer = ctk.CTkFrame(card, fg_color="transparent")
-        footer.pack(fill="x", padx=14, pady=(0, 12))
+            self._add_param_widget(params_scroll, spec, index // 2, index % 2)
 
         ctk.CTkButton(
-            footer,
+            params_card,
             text="Reset defaults",
             width=120,
             height=28,
             fg_color="transparent",
-            hover_color=Theme.SURFACE_ALT,
+            hover_color=Theme.SURFACE,
             border_width=1,
             border_color=Theme.BORDER,
             text_color=Theme.MUTED,
             command=self._reset_defaults,
-        ).pack(side="left")
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        # Synthesis
+        run_wrap = self._card(scroll, "Synthesis")
+        run_wrap.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        run_card = run_wrap.card  # type: ignore[attr-defined]
+
+        run_inner = ctk.CTkFrame(run_card, fg_color="transparent")
+        run_inner.pack(fill="x", padx=14, pady=14)
+        run_inner.grid_columnconfigure(0, weight=1)
+
+        self.run_btn = ctk.CTkButton(
+            run_inner,
+            text="Run SMS",
+            height=42,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color=Theme.ORANGE,
+            hover_color=Theme.ORANGE_DIM,
+            text_color="#1a1000",
+            command=self._run_sms,
+        )
+        self.run_btn.grid(row=0, column=0, sticky="ew")
+
+        status_row = ctk.CTkFrame(run_inner, fg_color="transparent")
+        status_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        status_row.grid_columnconfigure(1, weight=1)
+
+        self.status_dot = ctk.CTkLabel(status_row, text="●", font=ctk.CTkFont(size=14), text_color=Theme.MUTED)
+        self.status_dot.grid(row=0, column=0, padx=(0, 8))
+
+        self.status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            status_row,
+            textvariable=self.status_var,
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.TEXT,
+            anchor="w",
+            wraplength=520,
+        ).grid(row=0, column=1, sticky="w")
+
+        self.progress = ctk.CTkProgressBar(run_inner, height=6, progress_color=Theme.TEAL, fg_color=Theme.BORDER)
+        self.progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.progress.set(0)
+        self.progress.grid_remove()
+
+        # Log
+        log_wrap = self._card(scroll, "Log")
+        log_wrap.grid(row=3, column=0, sticky="ew")
+        log_card = log_wrap.card  # type: ignore[attr-defined]
+
+        self.log = ctk.CTkTextbox(
+            log_card,
+            height=120,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color=Theme.SURFACE,
+            text_color=Theme.MUTED,
+            wrap="word",
+        )
+        self.log.pack(fill="x", padx=10, pady=10)
+        self.log.configure(state="disabled")
+
+    def _build_visuals_tab(self) -> None:
+        scroll = ctk.CTkScrollableFrame(self.tab_visuals, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        hint = ctk.CTkLabel(
+            scroll,
+            text="Waveform previews update after loading audio and running SMS.",
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.MUTED,
+            anchor="w",
+        )
+        hint.grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        for row, (key, title, color, fill) in enumerate(WAVEFORM_BRANCHES):
+            panel = WaveformPanel(scroll, title, color, fill)
+            panel.grid(row=row + 1, column=0, sticky="ew", pady=4)
+            self.wave_panels[key] = panel
+
+        options_wrap = self._card(scroll, "Analysis figures")
+        options_wrap.grid(row=5, column=0, sticky="ew", pady=(16, 0))
+        options = options_wrap.card  # type: ignore[attr-defined]
+
+        options_inner = ctk.CTkFrame(options, fg_color="transparent")
+        options_inner.pack(fill="x", padx=14, pady=14)
+
+        self.show_figures_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            options_inner,
+            text="Enable Figures tab",
+            variable=self.show_figures_var,
+            checkbox_height=20,
+            checkbox_width=20,
+            fg_color=Theme.TEAL,
+            hover_color=Theme.TEAL_DIM,
+            border_color=Theme.BORDER,
+            command=self._toggle_figures_tab,
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            options_inner,
+            text="Adds a Figures tab with spectrogram plots from examples/plot_decomposition.py",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.MUTED,
+            anchor="w",
+            wraplength=560,
+        ).pack(anchor="w", pady=(8, 12))
+
+        for key, label, script in FIGURE_OPTIONS:
+            var = tk.BooleanVar(value=True)
+            self.figure_vars[key] = var
+            row = ctk.CTkFrame(options_inner, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkCheckBox(
+                row,
+                text=label,
+                variable=var,
+                checkbox_height=18,
+                checkbox_width=18,
+                fg_color=Theme.ORANGE,
+                hover_color=Theme.ORANGE_DIM,
+                border_color=Theme.BORDER,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=f"  ({script})",
+                font=ctk.CTkFont(size=11),
+                text_color=Theme.MUTED,
+            ).pack(side="left")
+
+    def _build_sounds_tab(self) -> None:
+        scroll = ctk.CTkScrollableFrame(self.tab_sounds, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        play_wrap = self._card(scroll, "Playback")
+        play_wrap.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        play_card = play_wrap.card  # type: ignore[attr-defined]
+
+        inner = ctk.CTkFrame(play_card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=14)
+        inner.grid_columnconfigure(0, weight=1)
+
+        for row, (branch, label, color) in enumerate(PLAYBACK_BRANCHES):
+            row_frame = ctk.CTkFrame(inner, fg_color=Theme.SURFACE, corner_radius=10)
+            row_frame.grid(row=row, column=0, sticky="ew", pady=4)
+            row_frame.grid_columnconfigure(1, weight=1)
+
+            dot = ctk.CTkFrame(row_frame, width=4, height=32, fg_color=color, corner_radius=2)
+            dot.grid(row=0, column=0, padx=(12, 10), pady=12)
+
+            ctk.CTkLabel(
+                row_frame,
+                text=label,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                text_color=Theme.TEXT,
+                anchor="w",
+            ).grid(row=0, column=1, sticky="w")
+
+            btn = ctk.CTkButton(
+                row_frame,
+                text="Play",
+                width=80,
+                height=32,
+                fg_color=Theme.SURFACE_ALT,
+                hover_color=Theme.BORDER,
+                border_width=1,
+                border_color=Theme.BORDER,
+                command=lambda b=branch: self._play(b),
+            )
+            btn.grid(row=0, column=2, padx=12, pady=12)
+            self.play_buttons[branch] = btn
+
+        action_row = ctk.CTkFrame(inner, fg_color="transparent")
+        action_row.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+
+        self.stop_btn = ctk.CTkButton(
+            action_row,
+            text="Stop",
+            width=100,
+            height=36,
+            fg_color=Theme.SURFACE,
+            hover_color=Theme.BORDER,
+            border_width=1,
+            border_color=Theme.BORDER,
+            command=self._stop_playback,
+        )
+        self.stop_btn.pack(side="left")
+
+        ctk.CTkButton(
+            action_row,
+            text="Save WAVs…",
+            width=120,
+            height=36,
+            fg_color=Theme.TEAL,
+            hover_color=Theme.TEAL_DIM,
+            command=self._save_outputs,
+        ).pack(side="right")
+
+        export_wrap = self._card(scroll, "Analysis summary")
+        export_wrap.grid(row=1, column=0, sticky="ew")
+        export_card = export_wrap.card  # type: ignore[attr-defined]
+
+        export_inner = ctk.CTkFrame(export_card, fg_color="transparent")
+        export_inner.pack(fill="x", padx=14, pady=14)
+
+        self.analysis_var = tk.StringVar(value="Run SMS to see f₀ and partial count.")
+        ctk.CTkLabel(
+            export_inner,
+            textvariable=self.analysis_var,
+            font=ctk.CTkFont(size=13),
+            text_color=Theme.TEXT,
+            anchor="w",
+            wraplength=560,
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            export_inner,
+            text="Outputs are saved automatically to output/gui/ after each run.",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.MUTED,
+            anchor="w",
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _build_figures_tab(self) -> None:
+        """Lazy-build the Figures tab content when first enabled."""
+        self.tab_figures = self.tabs.add(FIGURES_TAB)
+        self.tab_figures.grid_columnconfigure(0, weight=1)
+        self.tab_figures.grid_rowconfigure(1, weight=1)
+
+        toolbar = ctk.CTkFrame(self.tab_figures, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        toolbar.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(
+            toolbar,
+            text="Generate figures",
+            width=140,
+            height=34,
+            fg_color=Theme.ORANGE,
+            hover_color=Theme.ORANGE_DIM,
+            text_color="#1a1000",
+            font=ctk.CTkFont(weight="bold"),
+            command=self._generate_figures,
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(
+            toolbar,
+            text="Save PNG…",
+            width=110,
+            height=34,
+            fg_color=Theme.SURFACE_ALT,
+            hover_color=Theme.BORDER,
+            border_width=1,
+            border_color=Theme.BORDER,
+            command=self._save_figure_png,
+        ).grid(row=0, column=1, padx=8)
+
+        ctk.CTkButton(
+            toolbar,
+            text="Open figures folder",
+            width=140,
+            height=34,
+            fg_color=Theme.SURFACE_ALT,
+            hover_color=Theme.BORDER,
+            border_width=1,
+            border_color=Theme.BORDER,
+            command=self._open_figures_dir,
+        ).grid(row=0, column=2)
+
+        self.figure_status_var = tk.StringVar(value="Run SMS, then generate figures.")
+        ctk.CTkLabel(
+            toolbar,
+            textvariable=self.figure_status_var,
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.MUTED,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        self.figure_host = ctk.CTkFrame(
+            self.tab_figures, fg_color=Theme.SURFACE_ALT, corner_radius=12, border_width=1, border_color=Theme.BORDER
+        )
+        self.figure_host.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        self.figure_host.grid_columnconfigure(0, weight=1)
+        self.figure_host.grid_rowconfigure(0, weight=1)
+
+        self.figure_placeholder = ctk.CTkLabel(
+            self.figure_host,
+            text="No figures yet.\nEnable options on the Visuals tab, run SMS, then click Generate.",
+            font=ctk.CTkFont(size=13),
+            text_color=Theme.MUTED,
+        )
+        self.figure_placeholder.grid(row=0, column=0)
+
+    def _toggle_figures_tab(self) -> None:
+        if self.show_figures_var.get():
+            if not self._figures_tab_visible:
+                self._build_figures_tab()
+                self._figures_tab_visible = True
+            self.tabs.set(FIGURES_TAB)
+        elif self._figures_tab_visible:
+            self.tabs.delete(FIGURES_TAB)
+            self._figures_tab_visible = False
+            self._figure_canvas = None
+            self._figure_toolbar = None
+            self._current_figure = None
 
     def _add_param_widget(self, parent: ctk.CTkScrollableFrame, spec: ParamSpec, row: int, col: int) -> None:
-        frame = ctk.CTkFrame(parent, fg_color=Theme.SURFACE_ALT, corner_radius=8)
+        frame = ctk.CTkFrame(parent, fg_color=Theme.SURFACE, corner_radius=8)
         frame.grid(row=row, column=col, sticky="ew", padx=4, pady=4)
         frame.grid_columnconfigure(0, weight=1)
 
@@ -356,12 +769,12 @@ class SmsGui(ctk.CTk):
                 values=list(spec.choices),
                 variable=var,
                 height=30,
-                fg_color=Theme.SURFACE,
+                fg_color=Theme.SURFACE_ALT,
                 border_color=Theme.BORDER,
                 button_color=Theme.BORDER,
                 button_hover_color=Theme.MUTED,
-                dropdown_fg_color=Theme.SURFACE,
-                dropdown_hover_color=Theme.SURFACE_ALT,
+                dropdown_fg_color=Theme.SURFACE_ALT,
+                dropdown_hover_color=Theme.SURFACE,
             )
             widget.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 8))
         else:
@@ -374,7 +787,7 @@ class SmsGui(ctk.CTk):
                 textvariable=var,
                 width=72,
                 height=30,
-                fg_color=Theme.SURFACE,
+                fg_color=Theme.SURFACE_ALT,
                 border_color=Theme.BORDER,
             )
             entry.grid(row=0, column=0, sticky="w")
@@ -398,154 +811,6 @@ class SmsGui(ctk.CTk):
 
         self.param_widgets[spec.key] = widget
         self._attach_tooltip(frame, spec.tooltip)
-
-    def _build_run_section(self) -> None:
-        card = self._section(3, "Synthesis")
-
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=14, pady=14)
-        inner.grid_columnconfigure(0, weight=1)
-
-        self.run_btn = ctk.CTkButton(
-            inner,
-            text="Run SMS",
-            height=42,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            fg_color=Theme.ORANGE,
-            hover_color=Theme.ORANGE_DIM,
-            text_color="#1a1000",
-            command=self._run_sms,
-        )
-        self.run_btn.grid(row=0, column=0, sticky="ew")
-
-        status_row = ctk.CTkFrame(inner, fg_color="transparent")
-        status_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        status_row.grid_columnconfigure(1, weight=1)
-
-        self.status_dot = ctk.CTkLabel(status_row, text="●", font=ctk.CTkFont(size=14), text_color=Theme.MUTED)
-        self.status_dot.grid(row=0, column=0, padx=(0, 8))
-
-        self.status_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            status_row,
-            textvariable=self.status_var,
-            font=ctk.CTkFont(size=12),
-            text_color=Theme.TEXT,
-            anchor="w",
-            wraplength=520,
-        ).grid(row=0, column=1, sticky="w")
-
-        self.progress = ctk.CTkProgressBar(inner, height=6, progress_color=Theme.TEAL, fg_color=Theme.BORDER)
-        self.progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        self.progress.set(0)
-        self.progress.grid_remove()
-
-    def _build_playback_section(self) -> None:
-        card = self._section(4, "Playback")
-
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=14, pady=14)
-        inner.grid_columnconfigure(tuple(range(4)), weight=1, uniform="play")
-
-        for col, (branch, label, color) in enumerate(PLAYBACK_BRANCHES):
-            btn = ctk.CTkButton(
-                inner,
-                text=label,
-                height=38,
-                fg_color=Theme.SURFACE_ALT,
-                hover_color=Theme.BORDER,
-                border_width=1,
-                border_color=Theme.BORDER,
-                text_color=Theme.TEXT,
-                command=lambda b=branch: self._play(b),
-            )
-            btn.grid(row=0, column=col, sticky="ew", padx=3)
-            self.play_buttons[branch] = btn
-            self._attach_tooltip(btn, f"Play {label.lower()} branch")
-
-        action_row = ctk.CTkFrame(inner, fg_color="transparent")
-        action_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-        action_row.grid_columnconfigure(0, weight=1)
-
-        self.stop_btn = ctk.CTkButton(
-            action_row,
-            text="Stop",
-            width=90,
-            height=32,
-            fg_color=Theme.SURFACE_ALT,
-            hover_color=Theme.BORDER,
-            border_width=1,
-            border_color=Theme.BORDER,
-            command=self._stop_playback,
-        )
-        self.stop_btn.pack(side="left")
-
-        ctk.CTkButton(
-            action_row,
-            text="Save WAVs…",
-            width=120,
-            height=32,
-            fg_color=Theme.TEAL,
-            hover_color=Theme.TEAL_DIM,
-            command=self._save_outputs,
-        ).pack(side="right")
-
-        self.analysis_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            action_row,
-            textvariable=self.analysis_var,
-            font=ctk.CTkFont(size=12),
-            text_color=Theme.MUTED,
-        ).pack(side="right", padx=(0, 16))
-
-    def _build_log_section(self) -> None:
-        outer = ctk.CTkFrame(self, fg_color="transparent")
-        outer.grid(row=5, column=0, sticky="nsew", padx=20, pady=(0, 16))
-        outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
-
-        header = ctk.CTkFrame(outer, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            header,
-            text="LOG",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=Theme.MUTED,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-
-        self.log_visible = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            header,
-            text="Show",
-            variable=self.log_visible,
-            width=60,
-            checkbox_height=18,
-            checkbox_width=18,
-            fg_color=Theme.TEAL,
-            hover_color=Theme.TEAL_DIM,
-            border_color=Theme.BORDER,
-            command=self._toggle_log,
-        ).grid(row=0, column=1, sticky="e")
-
-        self.log_card = ctk.CTkFrame(outer, fg_color=Theme.SURFACE, corner_radius=12, border_width=1, border_color=Theme.BORDER)
-        self.log_card.grid(row=1, column=0, sticky="nsew")
-        self.log_card.grid_columnconfigure(0, weight=1)
-        self.log_card.grid_rowconfigure(0, weight=1)
-
-        self.log = ctk.CTkTextbox(
-            self.log_card,
-            height=110,
-            font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color=Theme.SURFACE_ALT,
-            text_color=Theme.MUTED,
-            wrap="word",
-            activate_scrollbars=True,
-        )
-        self.log.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.log.configure(state="disabled")
 
     # ── Small UI helpers ─────────────────────────────────────────────────
 
@@ -607,6 +872,9 @@ class SmsGui(ctk.CTk):
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _e: self._load_audio())
         self.bind("<Control-r>", lambda _e: self._run_sms())
+        self.bind("<Control-1>", lambda _e: self.tabs.set("General"))
+        self.bind("<Control-2>", lambda _e: self.tabs.set("Visuals"))
+        self.bind("<Control-3>", lambda _e: self.tabs.set("Sounds"))
         self.bind("<space>", self._on_stop_shortcut)
         self.bind("<Escape>", lambda _e: self._stop_playback())
 
@@ -616,12 +884,6 @@ class SmsGui(ctk.CTk):
             return None
         self._stop_playback()
         return "break"
-
-    def _toggle_log(self) -> None:
-        if self.log_visible.get():
-            self.log_card.grid()
-        else:
-            self.log_card.grid_remove()
 
     def _set_status(self, state: Literal["idle", "busy", "ok", "error"], message: str) -> None:
         colors = {
@@ -659,61 +921,21 @@ class SmsGui(ctk.CTk):
             self.progress.set(0.0 if current >= 0.95 else current + 0.04)
             self._progress_job = self.after(80, self._animate_progress)
 
-    # ── Waveform preview (lightweight) ───────────────────────────────────
-
-    def _draw_empty_waveform(self) -> None:
-        self.wave_canvas.delete("all")
-        w = max(self.wave_canvas.winfo_width(), 400)
-        h = 72
-        mid = h // 2
-        self.wave_canvas.create_line(0, mid, w, mid, fill=Theme.BORDER, width=1)
-        self.wave_canvas.create_text(
-            w // 2,
-            mid,
-            text="waveform preview",
-            fill=Theme.MUTED,
-            font=("Segoe UI", 10),
-        )
-
-    def _update_waveform(self, audio: np.ndarray | None) -> None:
-        if audio is None or len(audio) == 0:
-            self._waveform_cache = []
-            self._draw_empty_waveform()
-            return
-
-        step = max(1, len(audio) // WAVEFORM_POINTS)
-        chunk = audio[::step]
-        peak = float(np.max(np.abs(chunk))) or 1.0
-        self._waveform_cache = (chunk / peak).tolist()
-        self._redraw_waveform()
-
-    def _redraw_waveform(self) -> None:
-        self.wave_canvas.delete("all")
-        w = max(self.wave_canvas.winfo_width(), 400)
-        h = 72
-        mid = h / 2
-        amp = (h / 2) - 6
-
-        if not self._waveform_cache:
-            self._draw_empty_waveform()
-            return
-
-        points: list[float] = []
-        n = len(self._waveform_cache)
-        for i, sample in enumerate(self._waveform_cache):
-            x = i * (w - 1) / max(n - 1, 1)
-            y = mid - sample * amp
-            points.extend((x, y))
-
-        fill_points = [(0, mid), *zip(points[::2], points[1::2]), (w, mid)]
-        flat_fill = [coord for point in fill_points for coord in point]
-        self.wave_canvas.create_polygon(*flat_fill, fill=Theme.WAVEFORM_FILL, outline="")
-        self.wave_canvas.create_line(*points, fill=Theme.WAVEFORM, width=1.5, smooth=True)
-        self.wave_canvas.create_line(0, mid, w, mid, fill=Theme.BORDER, width=1)
-
-    def _on_wave_resize(self, _event: tk.Event) -> None:
-        if self._waveform_cache:
-            self._redraw_waveform()
+    def _update_all_waveforms(self) -> None:
+        audio_map = {
+            "original": self.original,
+            "det": self.det,
+            "stoch": self.stoch,
+            "full": self.full,
+        }
+        for key, panel in self.wave_panels.items():
+            audio = audio_map.get(key)
+            if audio is not None and len(audio) > 0:
+                panel.set_audio(audio)
+            elif key == "original":
+                panel.clear()
+            else:
+                panel.clear()
 
     # ── Logging ──────────────────────────────────────────────────────────
 
@@ -783,16 +1005,18 @@ class SmsGui(ctk.CTk):
             self.det = None
             self.stoch = None
             self.full = None
+            self.analysis = None
             self.analysis_info = ""
-            self.analysis_var.set("")
+            self.analysis_var.set("Run SMS to see f₀ and partial count.")
 
             duration = len(audio) / sr
             self.path_var.set(self.input_path.name)
             self.meta_var.set(f"{duration:.2f} s  ·  {sr:,} Hz  ·  {len(audio):,} samples")
-            self._update_waveform(audio)
+            self._update_all_waveforms()
             self._set_status("ok", f"Loaded {duration:.2f} s @ {sr} Hz")
             self._log(f"Loaded {self.input_path.name} ({duration:.2f} s, {sr} Hz)")
             self._update_playback_state()
+            self.tabs.set("Visuals")
         except Exception as exc:
             messagebox.showerror("Load error", str(exc))
             self._log(f"Load error: {exc}")
@@ -822,6 +1046,7 @@ class SmsGui(ctk.CTk):
                 params=params,
             )
             self.det, self.stoch, self.full = det, stoch, full
+            self.analysis = analysis
             self.analysis_info = (
                 f"f₀ ≈ {analysis.f0_hz:.1f} Hz  ·  {len(analysis.partials)} partials"
             )
@@ -837,7 +1062,11 @@ class SmsGui(ctk.CTk):
             self.after(0, lambda: self.analysis_var.set(self.analysis_info))
             self.after(0, lambda: self._log(msg))
             self.after(0, lambda: self._log(f"Saved outputs to {OUTPUT_DIR}"))
+            self.after(0, self._update_all_waveforms)
             self.after(0, self._update_playback_state)
+            self.after(0, lambda: self.tabs.set("Visuals"))
+            if self._figures_tab_visible and self.figure_vars["decomposition"].get():
+                self.after(0, self._generate_figures)
         except Exception as exc:
             err = str(exc)
             self.after(0, lambda e=err: messagebox.showerror("SMS error", e))
@@ -845,6 +1074,99 @@ class SmsGui(ctk.CTk):
             self.after(0, lambda e=err: self._log(f"Error: {e}"))
         finally:
             self.after(0, lambda: self._set_busy(False))
+
+    # ── Figures ────────────────────────────────────────────────────────
+
+    def _generate_figures(self) -> None:
+        if not self._figures_tab_visible:
+            messagebox.showinfo("Figures disabled", "Enable the Figures tab on the Visuals tab first.")
+            return
+        if self.det is None or self.stoch is None or self.analysis is None:
+            messagebox.showinfo("No results", "Run SMS first.")
+            return
+        if not any(var.get() for var in self.figure_vars.values()):
+            messagebox.showinfo("No figure selected", "Select at least one figure type on the Visuals tab.")
+            return
+
+        try:
+            params = self._params_from_gui()
+        except ValueError as exc:
+            messagebox.showerror("Invalid parameters", str(exc))
+            return
+
+        want_decomposition = self.figure_vars["decomposition"].get()
+        if hasattr(self, "figure_status_var"):
+            self.figure_status_var.set("Generating figures…")
+        threading.Thread(
+            target=self._generate_figures_worker,
+            args=(params, want_decomposition),
+            daemon=True,
+        ).start()
+
+    def _generate_figures_worker(self, params, want_decomposition: bool) -> None:
+        try:
+            if want_decomposition:
+                fig = create_decomposition_figure(
+                    self.original,
+                    self.det,
+                    self.stoch,
+                    self.sample_rate_hz,
+                    self.analysis,
+                    n_fft=params.n_fft,
+                    hop_size=params.hop_size,
+                )
+                FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+                stem = self.input_path.stem if self.input_path else "output"
+                png_path = FIGURES_DIR / f"{stem}_decomposition.png"
+                fig.savefig(png_path, dpi=120, bbox_inches="tight")
+                self.after(0, lambda f=fig, p=png_path: self._show_figure(f, p))
+            else:
+                self.after(0, lambda: self.figure_status_var.set("No figure type selected."))
+        except Exception as exc:
+            err = str(exc)
+            self.after(0, lambda e=err: messagebox.showerror("Figure error", e))
+            self.after(0, lambda e=err: self.figure_status_var.set(f"Error: {e}"))
+
+    def _show_figure(self, fig, path: Path) -> None:
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        if self._figure_canvas is not None:
+            self._figure_canvas.get_tk_widget().destroy()
+        if self._figure_toolbar is not None:
+            self._figure_toolbar.destroy()
+        if self._current_figure is not None:
+            import matplotlib.pyplot as plt
+
+            plt.close(self._current_figure)
+
+        self.figure_placeholder.grid_remove()
+        self._current_figure = fig
+        self._figure_canvas = FigureCanvasTkAgg(fig, master=self.figure_host)
+        self._figure_canvas.draw()
+        self._figure_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.figure_status_var.set(f"Showing decomposition spectrograms — saved to {path}")
+        self.tabs.set(FIGURES_TAB)
+
+    def _save_figure_png(self) -> None:
+        if self._current_figure is None:
+            messagebox.showinfo("No figure", "Generate figures first.")
+            return
+        dest = filedialog.asksaveasfilename(
+            title="Save figure",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png")],
+        )
+        if not dest:
+            return
+        self._current_figure.savefig(dest, dpi=150, bbox_inches="tight")
+        self._log(f"Saved figure to {dest}")
+        self.figure_status_var.set(f"Saved to {dest}")
+
+    def _open_figures_dir(self) -> None:
+        FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+        import os
+
+        os.startfile(FIGURES_DIR)  # type: ignore[attr-defined]
 
     # ── Playback ───────────────────────────────────────────────────────
 
@@ -869,7 +1191,7 @@ class SmsGui(ctk.CTk):
                 enabled = has_audio
             else:
                 enabled = has_results
-            btn.configure(state="normal" if enabled else "disabled")
+            btn.configure(state="normal" if enabled else "disabled", text="Play" if self._playing_branch != branch else "▶ Playing")
             if not enabled and self._playing_branch == branch:
                 self._playing_branch = None
             self._style_play_button(branch)
@@ -883,7 +1205,7 @@ class SmsGui(ctk.CTk):
             btn.configure(fg_color=accent, hover_color=accent, text_color="#0c0e14", border_color=accent)
         else:
             btn.configure(
-                fg_color=Theme.SURFACE_ALT,
+                fg_color=Theme.SURFACE,
                 hover_color=Theme.BORDER,
                 text_color=Theme.TEXT,
                 border_color=Theme.BORDER,
